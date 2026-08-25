@@ -5,8 +5,14 @@ export interface ParseResult {
   confidence: 'high' | 'low' | 'none';
 }
 
+/**
+ * CATÁLOGO DE CORTES
+ * ------------------
+ * Agregar aquí todos los cortes que se manejan en el local.
+ * El sistema compara estos nombres contra el texto leído por el OCR
+ * usando coincidencia difusa (fuzzy matching) para tolerar errores de lectura.
+ */
 const DEFAULT_CUTS = [
-  // Cortes de vacuno comunes en Chile/Sudamérica
   'ASADO DEL CARNICERO',
   'ASADO DE TIRA',
   'SOBRECOSTILLA',
@@ -31,7 +37,11 @@ const DEFAULT_CUTS = [
   'PLATEADA',
   'PUNTA DE PALETA',
   'COLUDA',
-  'OSSOBUCO'
+  'OSSOBUCO',
+  'OSOBUCO',
+  'PALETA',
+  'CARNE MOLIDA',
+  'CHOCLILLO'
 ];
 
 export class ParserService {
@@ -63,100 +73,206 @@ export class ParserService {
     };
   }
 
+  /**
+   * Normaliza un string para comparación difusa, eliminando
+   * espacios, acentos y caracteres que el OCR suele confundir.
+   */
   private normalizeForMatching(str: string): string {
     return str
       .toUpperCase()
-      .replace(/\s+/g, '')                  // Eliminar espacios
-      .replace(/[1IL|]/g, 'L')              // Normalizar caracteres tipo 'L' o 'I' o '|'
-      .replace(/[0OQ]/g, 'O')               // Normalizar ceros y 'O'
-      .replace(/[UÚ]/g, 'U')
-      .replace(/[AÁ]/g, 'A')
-      .replace(/[EÉ]/g, 'E')
-      .replace(/[IÍ]/g, 'I')
-      .replace(/[OÓ]/g, 'O');
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+      .replace(/\s+/g, '')
+      .replace(/[1IL|!]/g, 'I')
+      .replace(/[0OQD]/g, 'O')
+      .replace(/[5S]/g, 'S')
+      .replace(/[8B]/g, 'B')
+      .replace(/[UV]/g, 'U')
+      .replace(/[CK]/g, 'C')
+      .replace(/[GQ]/g, 'G')
+      .replace(/[YJ]/g, 'Y')
+      .replace(/[^A-Z]/g, '');
   }
 
+  /**
+   * Detecta el nombre del corte de carne en el texto del OCR.
+   * 
+   * Estrategias (en orden de prioridad):
+   * 1. Buscar "Producto:" y extraer el nombre que le sigue.
+   * 2. Coincidencia difusa contra el catálogo de cortes.
+   */
   private detectCut(text: string): string | null {
+    // Estrategia 1: Buscar "Producto:" (etiquetas brasileñas/chilenas)
+    // Ejemplo: "Producto: [464544] ASADO DEL CARNICERO"
+    const productoMatch = text.match(/PRODUC?TO\s*:?\s*(?:\[\d+\])?\s*(.+)/i);
+    if (productoMatch) {
+      const productLine = productoMatch[1].trim().toUpperCase();
+      // Intentar matchear contra el catálogo
+      for (const cut of this.cuts) {
+        if (productLine.includes(cut)) {
+          return cut;
+        }
+        // Fuzzy match también
+        const normalizedProduct = this.normalizeForMatching(productLine);
+        const normalizedCut = this.normalizeForMatching(cut);
+        if (normalizedProduct.includes(normalizedCut)) {
+          return cut;
+        }
+      }
+      // Si no matchea el catálogo pero tiene al menos 4 caracteres,
+      // extraer las primeras palabras significativas como nombre de corte
+      const cleanProduct = productLine.replace(/\d+/g, '').replace(/[[\]()]/g, '').trim();
+      if (cleanProduct.length >= 4) {
+        // Tomar hasta las primeras 4 palabras significativas
+        const words = cleanProduct.split(/\s+/).slice(0, 4).join(' ');
+        return words;
+      }
+    }
+
+    // Estrategia 2: Búsqueda difusa contra el catálogo completo
     const normalizedText = this.normalizeForMatching(text);
     
-    for (const cut of this.cuts) {
+    // Priorizar cortes más largos (más específicos) primero
+    const sortedCuts = [...this.cuts].sort((a, b) => b.length - a.length);
+    
+    for (const cut of sortedCuts) {
       const normalizedCut = this.normalizeForMatching(cut);
       if (normalizedText.includes(normalizedCut)) {
         return cut;
       }
     }
+
+    // Estrategia 3: Buscar variaciones comunes en texto completo
+    // "CARNE ENFRIADA DE VACUNO" -> buscar "VACUNO", "BOVINO", etc.
+    const meatKeywords = [
+      { keyword: 'ASADO', cut: 'ASADO' },
+      { keyword: 'FILETE', cut: 'FILETE' },
+      { keyword: 'LOMO', cut: 'LOMO' },
+      { keyword: 'POSTA', cut: 'POSTA' },
+      { keyword: 'ENTRA', cut: 'ENTRAÑA' },
+    ];
+    
+    for (const { keyword, cut } of meatKeywords) {
+      if (text.includes(keyword)) {
+        // Intentar extraer más contexto
+        const idx = text.indexOf(keyword);
+        const context = text.substring(idx, Math.min(idx + 30, text.length)).split('\n')[0].trim();
+        const words = context.split(/\s+/).slice(0, 4).join(' ');
+        return words.length > 3 ? words : cut;
+      }
+    }
+
     return null;
   }
 
+  /**
+   * Detecta el peso neto de la caja en el texto del OCR.
+   * 
+   * Estrategias (en orden de prioridad):
+   * 1. Validación matemática: Tara + Neto = Bruto
+   * 2. Proximidad a palabras clave como "PESO NETO", "NETO", "LIQUIDO"
+   * 3. Búsqueda en todo el texto por patrones numéricos razonables
+   */
   private detectNetWeight(text: string): { weight: number | null; needsReview: boolean } {
-    // 1. Extraer todos los números que parezcan pesos (con decimales)
-    // Coincide con números como 16.65, 17,85, 1.200
-    const numberRegex = /\b\d+[.,]\d{1,3}\b/g;
-    const matches = text.match(numberRegex);
+    // Extraer todos los números con decimales del texto completo
+    const numberRegex = /(\d+)[.,](\d{1,3})/g;
+    const rawMatches: { full: string; value: number }[] = [];
+    let match;
     
-    if (!matches) {
+    while ((match = numberRegex.exec(text)) !== null) {
+      const numStr = match[1] + '.' + match[2];
+      const value = parseFloat(numStr);
+      if (!isNaN(value) && value > 0) {
+        rawMatches.push({ full: match[0], value });
+      }
+    }
+    
+    if (rawMatches.length === 0) {
       return { weight: null, needsReview: true };
     }
 
-    // Parsear a floats únicos ordenados de menor a mayor
-    const numbers = Array.from(new Set(
-      matches.map(m => parseFloat(m.replace(',', '.')))
-    )).sort((a, b) => a - b);
+    const numbers = rawMatches.map(m => m.value);
+    const uniqueNumbers = Array.from(new Set(numbers)).sort((a, b) => a - b);
 
-    // 2. Intentar validación matemática de balanza: Tara + Neto = Bruto
-    // Buscamos cualquier combinación A - B = T donde:
-    // A es Bruto (el mayor), B es Neto (el del medio), T es Tara (el menor)
-    if (numbers.length >= 3) {
-      for (let i = numbers.length - 1; i >= 2; i--) {
-        const A = numbers[i]; // Candidato a Bruto (más grande)
+    // ======= ESTRATEGIA 1: Validación matemática =======
+    // Si encontramos 3 números donde Bruto - Neto ≈ Tara, es una coincidencia perfecta
+    if (uniqueNumbers.length >= 3) {
+      for (let i = uniqueNumbers.length - 1; i >= 2; i--) {
+        const bruto = uniqueNumbers[i];
         for (let j = i - 1; j >= 1; j--) {
-          const B = numbers[j]; // Candidato a Neto
+          const neto = uniqueNumbers[j];
           for (let k = j - 1; k >= 0; k--) {
-            const T = numbers[k]; // Candidato a Tara
+            const tara = uniqueNumbers[k];
             
-            // Si A (Bruto) - B (Neto) es aproximadamente T (Tara)
-            // Y el peso neto está en un rango razonable para una caja de carne (ej: 4kg a 45kg)
-            // Y la tara es razonable (ej: < 4kg)
-            if (Math.abs(A - B - T) < 0.05 && B >= 4 && B <= 45 && T < 4) {
-              return { weight: B, needsReview: false }; // ¡Coincidencia matemática exacta encontrada!
+            if (Math.abs(bruto - neto - tara) < 0.1 && neto >= 3 && neto <= 50 && tara < 5) {
+              return { weight: neto, needsReview: false };
             }
           }
         }
       }
     }
 
-    // 3. Si no hay validación matemática, buscar por palabras clave
-    const netKeywords = ['PESO NETO', 'NETO', 'NET WEIGHT', 'NET', 'PESO LIQUIDO', 'LIQUIDO', 'P.NETO', 'P.NET', 'LIQ'];
+    // ======= ESTRATEGIA 2: Búsqueda por palabras clave en líneas =======
+    const netKeywords = ['PESO NETO', 'NETO', 'NET WEIGHT', 'NET', 'PESO LIQUIDO', 'LIQUIDO', 'P.NETO', 'P. NETO', 'P.NET', 'LIQ'];
     const grossKeywords = ['PESO BRUTO', 'BRUTO', 'PESO GRUESO', 'GRUESO', 'GROSS', 'BRUT'];
+    const taraKeywords = ['TARA', 'TARE'];
     
-    const hasNetKeyword = netKeywords.some(kw => text.includes(kw));
-    const hasGrossKeyword = grossKeywords.some(kw => text.includes(kw));
-
-    // Filtrar números en rango típico de caja de carne (4kg a 45kg)
-    const validWeights = numbers.filter(n => n >= 4 && n <= 45);
-
-    if (validWeights.length === 1) {
-      // Si solo hay un peso lógico en la etiqueta y hay palabra clave de Neto
-      return { weight: validWeights[0], needsReview: !hasNetKeyword };
-    }
-
-    if (validWeights.length >= 2) {
-      // Si tenemos al menos dos pesos lógicos (probablemente Bruto y Neto)
-      // Y detectamos ambas palabras clave en la etiqueta
-      if (hasNetKeyword && hasGrossKeyword) {
-        // En cajas de carne, el Peso Neto es SIEMPRE menor que el Peso Bruto
-        // Tomamos el menor de los dos pesos más grandes
-        const sortedValid = validWeights.sort((a, b) => b - a); // orden descendente
-        const net = sortedValid[1];
-        
-        return { weight: net, needsReview: false };
+    // Buscar por proximidad: keyword cerca de un número
+    const lines = text.split('\n');
+    let netFromKeyword: number | null = null;
+    let grossFromKeyword: number | null = null;
+    
+    for (const line of lines) {
+      const upperLine = line.toUpperCase();
+      const lineNumbers = [...upperLine.matchAll(/(\d+)[.,](\d{1,3})/g)].map(m => {
+        return parseFloat(m[1] + '.' + m[2]);
+      }).filter(n => !isNaN(n) && n > 0);
+      
+      if (lineNumbers.length === 0) continue;
+      
+      const isNetLine = netKeywords.some(kw => upperLine.includes(kw));
+      const isGrossLine = grossKeywords.some(kw => upperLine.includes(kw));
+      const isTaraLine = taraKeywords.some(kw => upperLine.includes(kw));
+      
+      if (isNetLine && !isGrossLine && !isTaraLine) {
+        // Tomar el número más grande de la línea (probablemente el peso neto)
+        const validNums = lineNumbers.filter(n => n >= 3 && n <= 50);
+        if (validNums.length > 0) {
+          netFromKeyword = Math.max(...validNums);
+        }
       }
       
-      // Si no tenemos ambas palabras clave pero sí la de neto, tomamos el menor por descarte
-      if (hasNetKeyword) {
-        const sortedValid = validWeights.sort((a, b) => a - b);
-        return { weight: sortedValid[0], needsReview: true };
+      if (isGrossLine && !isNetLine) {
+        const validNums = lineNumbers.filter(n => n >= 3 && n <= 50);
+        if (validNums.length > 0) {
+          grossFromKeyword = Math.max(...validNums);
+        }
       }
+    }
+    
+    if (netFromKeyword !== null) {
+      return { weight: netFromKeyword, needsReview: false };
+    }
+
+    // ======= ESTRATEGIA 3: Si encontramos Bruto pero no Neto, deducir =======
+    if (grossFromKeyword !== null) {
+      // Si tenemos bruto, buscar un número menor que sea el neto
+      const possibleNet = uniqueNumbers.filter(n => n < grossFromKeyword && n >= 3 && n <= 50);
+      if (possibleNet.length > 0) {
+        // Tomar el más grande que sea menor al bruto (probable neto)
+        return { weight: Math.max(...possibleNet), needsReview: true };
+      }
+    }
+
+    // ======= ESTRATEGIA 4: Heurística con todos los números =======
+    const validWeights = uniqueNumbers.filter(n => n >= 3 && n <= 50);
+    
+    if (validWeights.length === 1) {
+      return { weight: validWeights[0], needsReview: true };
+    }
+    
+    if (validWeights.length === 2) {
+      // Si hay exactamente 2 pesos válidos, el menor probablemente es el neto
+      return { weight: Math.min(...validWeights), needsReview: true };
     }
 
     return { weight: null, needsReview: true };
