@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { AlertTriangle, CheckCircle2, Camera, Zap } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Camera, Zap, Flashlight, FlashlightOff } from 'lucide-react';
 import { ocrService } from '../services/ocrService';
 import { parserService } from '../services/parserService';
 import type { ParseResult } from '../services/parserService';
 import { duplicateService } from '../services/duplicateService';
 import { db } from '../services/db';
+import { computeCropRect } from '../services/imageUtils';
+
+// Constraint no estandarizada todavía en los tipos de TS, pero soportada
+// por Chrome/Android para prender el flash de la cámara trasera.
+interface TorchConstraint {
+  advanced: [{ torch: boolean }];
+}
 
 interface ScannerProps {
   onScanSuccess: () => void;
@@ -20,6 +27,8 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
   const [statusMsg, setStatusMsg] = useState('Inicializando cámara...');
   const [debugText, setDebugText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
+  const [torchOn, setTorchOn] = useState(false);
   
   // Validation Modal State
   const [showValidation, setShowValidation] = useState(false);
@@ -31,8 +40,13 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
   const [editCut, setEditCut] = useState('');
   const [editWeight, setEditWeight] = useState('');
 
-  // Start camera once on mount
+  // Start camera once on mount. Al mismo tiempo (sin esperarlo) arrancamos
+  // la inicializacion del worker de OCR: descargar/compilar el modelo de
+  // Tesseract tarda unos segundos, asi que si lo hacemos recien al
+  // presionar CAPTURAR el usuario nota esa demora en el primer escaneo.
   useEffect(() => {
+    ocrService.init();
+
     const startCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -47,7 +61,12 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
           videoRef.current.srcObject = stream;
           videoRef.current.play();
         }
-        setStatusMsg('📷 Apunte a la etiqueta y presione CAPTURAR');
+
+        const track = stream.getVideoTracks()[0];
+        const capabilities = track.getCapabilities ? track.getCapabilities() : undefined;
+        setTorchSupported(!!(capabilities && (capabilities as MediaTrackCapabilities & { torch?: boolean }).torch));
+
+        setStatusMsg(' Apunte a la etiqueta y presione CAPTURAR');
         setIsScanning(true);
       } catch (err) {
         console.error("Error accessing camera:", err);
@@ -63,6 +82,19 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
       }
     };
   }, []);
+
+  const toggleTorch = useCallback(async () => {
+    const track = streamRef.current?.getVideoTracks()[0];
+    if (!track) return;
+    const nextState = !torchOn;
+    try {
+      const constraint: TorchConstraint = { advanced: [{ torch: nextState }] };
+      await track.applyConstraints(constraint as unknown as MediaTrackConstraints);
+      setTorchOn(nextState);
+    } catch (e) {
+      console.error('No se pudo alternar la linterna', e);
+    }
+  }, [torchOn]);
 
   // Auto scanning loop
   useEffect(() => {
@@ -98,16 +130,23 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
     if (!videoRef.current || !canvasRef.current || isProcessing) return;
     
     setIsProcessing(true);
-    setStatusMsg('🔍 Procesando...');
+    setStatusMsg(ocrService.isReady() ? 'Procesando...' : 'Preparando lector (primera vez)...');
     
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const context = canvas.getContext('2d');
     
     if (context && video.videoWidth > 0) {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const crop = computeCropRect(video.videoWidth, video.videoHeight);
+      canvas.width = crop.width;
+      canvas.height = crop.height;
+
+      context.filter = 'grayscale(1) contrast(1.3)';
+      context.drawImage(
+        video,
+        crop.x, crop.y, crop.width, crop.height,
+        0, 0, crop.width, crop.height
+      );
       
       try {
         const text = await ocrService.recognize(canvas);
@@ -274,8 +313,18 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
             title="Escaneo automático continuo"
           >
             <Zap size={18} />
-            {isAutoMode ? 'AUTO ✓' : 'AUTO'}
+            {isAutoMode ? 'AUTO ' : 'AUTO'}
           </button>
+          {torchSupported && (
+            <button
+              className={`btn ${torchOn ? 'btn-success' : 'btn-secondary'}`}
+              onClick={toggleTorch}
+              style={{ flex: '0 0 auto', minWidth: '3rem' }}
+              title="Linterna"
+            >
+              {torchOn ? <Flashlight size={18} /> : <FlashlightOff size={18} />}
+            </button>
+          )}
         </div>
       )}
 
