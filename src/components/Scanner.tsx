@@ -54,10 +54,8 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
   // la inicializacion del worker de OCR: descargar/compilar el modelo de
   // Tesseract tarda unos segundos, asi que si lo hacemos recien al
   // presionar CAPTURAR el usuario nota esa demora en el primer escaneo.
-  useEffect(() => {
-    ocrService.init();
-
-    const startCamera = async () => {
+  const startCamera = useCallback(async () => {
+    if (streamRef.current) return; // ya esta prendida, no duplicar
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: {
@@ -80,10 +78,28 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
         setIsScanning(true);
       } catch (err) {
         console.error("Error accessing camera:", err);
-        setStatusMsg('❌ Error: No se pudo acceder a la cámara');
+        setStatusMsg(' Error: No se pudo acceder a la cámara');
       }
-    };
+  }, []);
 
+  // Apaga la camara en vivo por completo (libera el hardware). Se usa
+  // antes de abrir el selector de foto/camara nativa del celular: en la
+  // mayoria de los celulares SOLO UNA app/pestaña puede usar la camara a
+  // la vez, asi que si dejamos nuestro stream de video corriendo, la
+  // camara nativa que abre el input de archivo puede chocar con el
+  // nuestro y comportarse raro (ej. solo prender el flash y no dejar
+  // sacar la foto). Por eso hay que soltarla antes de subir una foto.
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    setIsScanning(false);
+    setTorchOn(false);
+  }, []);
+
+  useEffect(() => {
+    ocrService.init();
     startCamera();
 
     return () => {
@@ -91,7 +107,27 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
         streamRef.current.getTracks().forEach(track => track.stop());
       }
     };
-  }, []);
+  }, [startCamera]);
+
+  // Red de seguridad para volver a prender la camara despues de que el
+  // usuario use el selector de foto/camara nativa (ya sea que elija una
+  // foto o cancele): escuchamos cuando la pagina vuelve a estar visible
+  // o la ventana recupera el foco, y si la camara quedo apagada, la
+  // reiniciamos solos sin que el usuario tenga que hacer nada.
+  useEffect(() => {
+    const maybeResumeCamera = () => {
+      if (!streamRef.current) startCamera();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') maybeResumeCamera();
+    };
+    window.addEventListener('focus', maybeResumeCamera);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('focus', maybeResumeCamera);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [startCamera]);
 
   const toggleTorch = useCallback(async () => {
     const track = streamRef.current?.getVideoTracks()[0];
@@ -238,14 +274,20 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
     } finally {
       URL.revokeObjectURL(objectUrl);
       setIsProcessing(false);
+      startCamera(); // la habiamos apagado antes de abrir el selector
     }
-  }, [isProcessing]);
+  }, [isProcessing, startCamera]);
 
   const handlePhotoSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (file) {
       processImageFile(file);
+    } else {
+      // El usuario cancelo el selector de foto/camara sin elegir nada:
+      // volvemos a prender la camara en vivo de una, sin esperar el
+      // evento de focus/visibilitychange.
+      startCamera();
     }
   };
 
@@ -460,7 +502,7 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
         <div style={{ padding: '0 0.75rem 0.75rem' }}>
           <button
             className='btn btn-secondary'
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => { stopCamera(); fileInputRef.current?.click(); }}
             disabled={isProcessing}
             style={{ width: '100%', fontSize: '0.9rem', padding: '0.75rem' }}
             title='Analizar una foto de la etiqueta en vez de la camara en vivo'
