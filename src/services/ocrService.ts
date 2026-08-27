@@ -39,7 +39,10 @@ export class OCRService {
     return this.worker !== null;
   }
 
-  public async recognize(imageData: string | HTMLCanvasElement | HTMLVideoElement): Promise<string> {
+  public async recognize(
+    imageData: string | HTMLCanvasElement | HTMLVideoElement,
+    pageSegMode: PSM = PSM.SINGLE_BLOCK
+  ): Promise<string> {
     if (!this.worker) {
       await this.init();
     }
@@ -49,6 +52,7 @@ export class OCRService {
     }
 
     try {
+      await this.worker.setParameters({ tessedit_pageseg_mode: pageSegMode });
       const { data: { text } } = await this.worker.recognize(imageData);
       return text;
     } catch (e) {

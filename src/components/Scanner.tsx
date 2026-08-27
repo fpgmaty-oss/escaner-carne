@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { AlertTriangle, CheckCircle2, Camera, Zap, Flashlight, FlashlightOff } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Camera, Zap, Flashlight, FlashlightOff, Upload } from 'lucide-react';
+import { PSM } from 'tesseract.js';
 import { ocrService } from '../services/ocrService';
 import { parserService } from '../services/parserService';
 import type { ParseResult } from '../services/parserService';
@@ -21,6 +22,7 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   
   const [isScanning, setIsScanning] = useState(false);
   const [isAutoMode, setIsAutoMode] = useState(false);
@@ -165,6 +167,55 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
     setIsProcessing(false);
   }, [isProcessing]);
 
+  // Analiza una foto elegida/tomada por el usuario (input file) en vez del
+  // stream de la cámara en vivo. No tenemos el marco guía acá, así que no
+  // podemos recortar la zona de la etiqueta: le pasamos la imagen completa
+  // a Tesseract con PSM.AUTO para que primero detecte dónde está el texto.
+  const processImageFile = useCallback(async (file: File) => {
+    if (!canvasRef.current || isProcessing) return;
+
+    setIsProcessing(true);
+    setStatusMsg(ocrService.isReady() ? 'Analizando foto...' : 'Preparando lector (primera vez)...');
+
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error('No se pudo leer la imagen'));
+        image.src = objectUrl;
+      });
+
+      const canvas = canvasRef.current;
+      const context = canvas.getContext('2d');
+      if (context) {
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        context.filter = 'grayscale(1) contrast(1.3)';
+        context.drawImage(img, 0, 0);
+
+        const text = await ocrService.recognize(canvas, PSM.AUTO);
+        const cleaned = text.replace(/\s+/g, ' ').trim();
+        setDebugText(cleaned.length > 200 ? cleaned.substring(0, 200) + '...' : cleaned);
+        processOcrText(text);
+      }
+    } catch (e) {
+      console.error('Error procesando la foto subida', e);
+      setStatusMsg(' No se pudo analizar la foto. Probá con otra.');
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+      setIsProcessing(false);
+    }
+  }, [isProcessing]);
+
+  const handlePhotoSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) {
+      processImageFile(file);
+    }
+  };
+
   const processOcrText = async (text: string) => {
     if (!text || text.trim().length < 5) {
       setStatusMsg('📷 No se detectó texto. Acerque más la cámara.');
@@ -294,6 +345,15 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
         </div>
       )}
 
+      <input
+        ref={fileInputRef}
+        type='file'
+        accept='image/*'
+        capture='environment'
+        style={{ display: 'none' }}
+        onChange={handlePhotoSelected}
+      />
+
       {/* Capture buttons */}
       {!showValidation && isScanning && (
         <div style={{ display: 'flex', gap: '0.5rem', padding: '0.75rem' }}>
@@ -325,6 +385,21 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
               {torchOn ? <Flashlight size={18} /> : <FlashlightOff size={18} />}
             </button>
           )}
+        </div>
+      )}
+
+      {!showValidation && (
+        <div style={{ padding: '0 0.75rem 0.75rem' }}>
+          <button
+            className='btn btn-secondary'
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isProcessing}
+            style={{ width: '100%', fontSize: '0.9rem', padding: '0.75rem' }}
+            title='Analizar una foto de la etiqueta en vez de la camara en vivo'
+          >
+            <Upload size={18} />
+            {isProcessing ? 'Analizando...' : 'SUBIR FOTO'}
+          </button>
         </div>
       )}
 
