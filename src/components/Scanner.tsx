@@ -345,6 +345,28 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
                 onChange={e => setEditCut(e.target.value)}
                 placeholder="Ej: ASADO DEL CARNICERO"
               />
+              {validationData?.cutSuggestions && validationData.cutSuggestions.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', marginTop: '0.5rem' }}>
+                  {validationData.cutSuggestions.map(suggestion => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      onClick={() => setEditCut(suggestion)}
+                      style={{
+                        padding: '0.35rem 0.7rem',
+                        borderRadius: 'var(--radius-full)',
+                        border: editCut === suggestion ? '1px solid var(--accent-color)' : '1px solid rgba(255,255,255,0.15)',
+                        backgroundColor: editCut === suggestion ? 'rgba(59,130,246,0.2)' : 'rgba(255,255,255,0.05)',
+                        color: 'var(--text-primary)',
+                        fontSize: '0.75rem',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             
             <div className="form-group">

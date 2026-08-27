@@ -3,7 +3,18 @@ export interface ParseResult {
   weightCandidate: number | null;
   needsReview: boolean;
   confidence: 'high' | 'low' | 'none';
+  /**
+   * Cortes del catalogo mas parecidos al texto leido, ordenados de mas a
+   * menos parecido. Se llenan solo cuando no hubo un match solido contra
+   * el catalogo (cutCandidate es null, o vino de una heuristica sin
+   * validar), para que el usuario pueda elegir con un toque en vez de
+   * escribir todo a mano.
+   */
+  cutSuggestions: string[];
 }
+
+/** Palabras sin valor discriminante para el matching de cortes. */
+const STOPWORDS = new Set(['DE', 'DEL', 'LA', 'LAS', 'EL', 'LOS', 'Y']);
 
 /**
  * CATÁLOGO DE CORTES
@@ -54,8 +65,16 @@ export class ParserService {
   public parseText(text: string): ParseResult {
     const upperText = text.toUpperCase();
     
-    const cutCandidate = this.detectCut(upperText);
-    const { weight, needsReview } = this.detectNetWeight(upperText);
+    const detected = this.detectCut(upperText);
+    const cutCandidate = detected ? detected.cut : null;
+    const { weight, needsReview: weightNeedsReview } = this.detectNetWeight(upperText);
+
+    // Si el corte no vino de un match contra el catalogo (fue una
+    // heuristica de "primeras palabras" o una keyword suelta como
+    // "ASADO"), no confiamos ciegamente: forzamos revision manual en vez
+    // de auto-registrar algo que puede estar incompleto o mal.
+    const cutNeedsReview = cutCandidate !== null && !detected!.matchedCatalog;
+    const needsReview = weightNeedsReview || cutNeedsReview;
 
     let confidence: 'high' | 'low' | 'none' = 'none';
     
@@ -65,11 +84,18 @@ export class ParserService {
       confidence = 'low';
     }
 
+    // Ofrecemos sugerencias del catalogo cuando no tenemos un corte, o
+    // cuando el que tenemos es solo una adivinanza sin validar.
+    const cutSuggestions = (!cutCandidate || cutNeedsReview)
+      ? this.getCutSuggestions(upperText)
+      : [];
+
     return {
       cutCandidate,
       weightCandidate: weight,
       needsReview: needsReview || (cutCandidate !== null && weight !== null && confidence === 'low'),
-      confidence
+      confidence,
+      cutSuggestions
     };
   }
 
@@ -93,6 +119,77 @@ export class ParserService {
       .replace(/[^A-Z]/g, '');
   }
 
+  private diceCoefficient(strA: string, strB: string): number {    if (strA === strB) return 1;
+    if (strA.length < 2 || strB.length < 2) return 0;
+    const toBigrams = (s: string): Map<string, number> => {
+      const map = new Map<string, number>();
+      for (let i = 0; i < s.length - 1; i++) {
+        const bg = s.substring(i, i + 2);
+        map.set(bg, (map.get(bg) || 0) + 1);
+      }
+      return map;
+    };
+    const bigramsA = toBigrams(strA);
+    const bigramsB = toBigrams(strB);
+    let intersection = 0;
+    bigramsA.forEach((countA, bg) => {
+      const countB = bigramsB.get(bg) || 0;
+      intersection += Math.min(countA, countB);
+    });
+    const totalBigrams = (strA.length - 1) + (strB.length - 1);
+    return totalBigrams === 0 ? 0 : (2 * intersection) / totalBigrams;
+  }
+
+  /**
+   * Extrae palabras relevantes de un string: mayusculas, sin acentos,
+   * sin puntuacion, descartando palabras muy cortas o sin valor (stopwords).
+   */
+  private extractWords(str: string): string[] {
+    return str
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase()
+      .split(/[^A-Z]+/)
+      .filter(w => w.length >= 3 && !STOPWORDS.has(w));
+  }
+
+  /**
+   * Busca en el catalogo los cortes mas parecidos al texto leido por el
+   * OCR, para ofrecerlos como sugerencias clickeables cuando no hay un
+   * match solido. Compara palabra por palabra con el coeficiente de Dice,
+   * asi que "ASADO" sugiere tanto "ASADO DEL CARNICERO" como "ASADO DE
+   * TIRA", y tolera errores tipicos de OCR (ej. "ASAD0").
+   */
+  public getCutSuggestions(text: string, maxResults = 3): string[] {
+    const textWords = this.extractWords(text);
+    if (textWords.length === 0) return [];
+
+    const scored = this.cuts.map(cut => {
+      const cutWords = this.extractWords(cut);
+      if (cutWords.length === 0) return { cut, score: 0, coverage: 0 };
+
+      let bestOverall = 0;
+      let matchedWords = 0;
+      for (const cutWord of cutWords) {
+        const bestForWord = Math.max(...textWords.map(tw => this.diceCoefficient(cutWord, tw)));
+        if (bestForWord > bestOverall) bestOverall = bestForWord;
+        if (bestForWord >= 0.6) matchedWords++;
+      }
+
+      // El score principal es la mejor palabra que matchea (para que
+      // "ASADO" solo alcance para sugerir "ASADO DEL CARNICERO"); la
+      // cobertura (cuantas palabras del corte aparecen en el texto) se usa
+      // solo para desempatar entre varias sugerencias igual de buenas.
+      const coverage = matchedWords / cutWords.length;
+      return { cut, score: bestOverall, coverage };
+    });
+
+    return scored
+      .filter(s => s.score >= 0.6)
+      .sort((a, b) => (b.score - a.score) || (b.coverage - a.coverage))
+      .slice(0, maxResults)
+      .map(s => s.cut);
+  }
+
   /**
    * Detecta el nombre del corte de carne en el texto del OCR.
    * 
@@ -102,7 +199,7 @@ export class ParserService {
    *    - Si el nombre se parte en la siguiente línea, intenta continuarlo
    * 2. Coincidencia difusa contra el catálogo de cortes.
    */
-  private detectCut(text: string): string | null {
+  private detectCut(text: string): { cut: string; matchedCatalog: boolean } | null {
     // Estrategia 1: Buscar "Producto:" / "Produto:" (etiquetas brasileñas/chilenas)
     // Maneja variaciones del OCR:
     //   Producto: [464544] ASADO DEL CARNICERO
@@ -133,14 +230,14 @@ export class ParserService {
       if (cleanProduct.length >= 4) {
         // Intentar matchear contra el catálogo
         for (const cut of this.cuts) {
-          if (cleanProduct.includes(cut)) return cut;
+          if (cleanProduct.includes(cut)) return { cut, matchedCatalog: true };
           const normalizedProduct = this.normalizeForMatching(cleanProduct);
           const normalizedCut = this.normalizeForMatching(cut);
-          if (normalizedProduct.includes(normalizedCut)) return cut;
+          if (normalizedProduct.includes(normalizedCut)) return { cut, matchedCatalog: true };
         }
         // Si no matchea el catálogo, usar las primeras 4 palabras significativas
         const words = cleanProduct.split(/\s+/).slice(0, 4).join(' ');
-        if (words.length >= 4) return words;
+        if (words.length >= 4) return { cut: words, matchedCatalog: false };
       }
     }
 
@@ -153,7 +250,7 @@ export class ParserService {
     for (const cut of sortedCuts) {
       const normalizedCut = this.normalizeForMatching(cut);
       if (normalizedText.includes(normalizedCut)) {
-        return cut;
+        return { cut, matchedCatalog: true };
       }
     }
 
@@ -173,7 +270,7 @@ export class ParserService {
         const idx = text.indexOf(keyword);
         const context = text.substring(idx, Math.min(idx + 30, text.length)).split('\n')[0].trim();
         const words = context.split(/\s+/).slice(0, 4).join(' ');
-        return words.length > 3 ? words : cut;
+        return { cut: words.length > 3 ? words : cut, matchedCatalog: false };
       }
     }
 
