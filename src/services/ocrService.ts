@@ -61,6 +61,40 @@ export class OCRService {
     }
   }
 
+  /**
+   * Igual que recognize(), pero ademas pide a Tesseract que separe el
+   * resultado en "bloques" de texto (regiones espacialmente separadas
+   * que el analizador de layout detecto por su cuenta). Se usa para el
+   * modo "foto con varias cajas": si en una sola foto aparecen varias
+   * etiquetas con espacio entre ellas, Tesseract normalmente las separa
+   * en bloques distintos, y podemos parsear cada uno como una caja
+   * independiente en vez de mezclar todo el texto en un solo blob.
+   */
+  public async recognizeWithBlocks(
+    imageData: string | HTMLCanvasElement | HTMLVideoElement,
+    pageSegMode: PSM = PSM.AUTO
+  ): Promise<{ text: string; blockTexts: string[] }> {
+    if (!this.worker) {
+      await this.init();
+    }
+
+    if (!this.worker) {
+      throw new Error('Worker failed to initialize');
+    }
+
+    try {
+      await this.worker.setParameters({ tessedit_pageseg_mode: pageSegMode });
+      const { data } = await this.worker.recognize(imageData, {}, { blocks: true, text: true });
+      const blockTexts = (data.blocks || [])
+        .map(b => b.text.trim())
+        .filter(t => t.length > 0);
+      return { text: data.text, blockTexts };
+    } catch (e) {
+      console.error('OCR Error:', e);
+      return { text: '', blockTexts: [] };
+    }
+  }
+
   public async terminate() {
     if (this.worker) {
       await this.worker.terminate();

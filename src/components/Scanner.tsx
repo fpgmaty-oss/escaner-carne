@@ -6,7 +6,10 @@ import { parserService } from '../services/parserService';
 import type { ParseResult } from '../services/parserService';
 import { duplicateService } from '../services/duplicateService';
 import { db } from '../services/db';
+import type { ScannedBox } from '../services/db';
 import { computeCropRect } from '../services/imageUtils';
+import { MultiBoxReview } from './MultiBoxReview';
+import type { MultiBoxCandidate } from './MultiBoxReview';
 
 // Constraint no estandarizada todavía en los tipos de TS, pero soportada
 // por Chrome/Android para prender el flash de la cámara trasera.
@@ -41,6 +44,11 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
   // Manual edit states inside validation modal
   const [editCut, setEditCut] = useState('');
   const [editWeight, setEditWeight] = useState('');
+
+  // Foto con varias cajas: cuando la deteccion por bloques encuentra 2+
+  // cajas en una sola imagen, se llena esta lista y se muestra el modal
+  // de revision multiple en vez del modal de una sola caja.
+  const [multiBoxCandidates, setMultiBoxCandidates] = useState<MultiBoxCandidate[] | null>(null);
 
   // Start camera once on mount. Al mismo tiempo (sin esperarlo) arrancamos
   // la inicializacion del worker de OCR: descargar/compilar el modelo de
@@ -194,10 +202,35 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
         context.filter = 'grayscale(1) contrast(1.3)';
         context.drawImage(img, 0, 0);
 
-        const text = await ocrService.recognize(canvas, PSM.AUTO);
+        // Pedimos los bloques de texto detectados por separado: si el
+        // analizador de layout de Tesseract encuentra 2 o mas regiones
+        // de texto bien separadas (foto con varias etiquetas juntas),
+        // tratamos cada una como una caja independiente. Si solo hay una
+        // region (o el analisis no separo nada), seguimos el flujo
+        // normal de una sola caja con el texto completo.
+        const { text, blockTexts } = await ocrService.recognizeWithBlocks(canvas, PSM.AUTO);
         const cleaned = text.replace(/\s+/g, ' ').trim();
         setDebugText(cleaned.length > 200 ? cleaned.substring(0, 200) + '...' : cleaned);
-        processOcrText(text);
+
+        const perBlockResults = blockTexts.length > 1
+          ? blockTexts
+              .map(blockText => parserService.parseText(blockText))
+              .filter(result => result.confidence !== 'none')
+          : [];
+
+        if (perBlockResults.length >= 2) {
+          setMultiBoxCandidates(
+            perBlockResults.map((result, idx) => ({
+              id: `${Date.now()}-${idx}`,
+              cut: result.cutCandidate || '',
+              weight: result.weightCandidate !== null ? result.weightCandidate.toString() : '',
+              suggestions: result.cutSuggestions
+            }))
+          );
+          setStatusMsg(`Se detectaron ${perBlockResults.length} cajas en la foto. Revisalas abajo.`);
+        } else {
+          processOcrText(text);
+        }
       }
     } catch (e) {
       console.error('Error procesando la foto subida', e);
@@ -264,15 +297,24 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
     setShowValidation(true);
   };
 
+  const saveBoxToDb = async (
+    cut: string,
+    weight: number,
+    status: ScannedBox['status'],
+    isManualCorrection: boolean
+  ) => {
+    await db.boxes.add({
+      cutName: cut.toUpperCase(),
+      netWeight: weight,
+      timestamp: Date.now(),
+      manualCorrection: isManualCorrection,
+      status
+    });
+  };
+
   const registerBox = async (cut: string, weight: number, isManualCorrection: boolean) => {
     try {
-      await db.boxes.add({
-        cutName: cut.toUpperCase(),
-        netWeight: weight,
-        timestamp: Date.now(),
-        manualCorrection: isManualCorrection,
-        status: isDuplicateWarning ? 'duplicate' : 'valid'
-      });
+      await saveBoxToDb(cut, weight, isDuplicateWarning ? 'duplicate' : 'valid', isManualCorrection);
       
       // Feedback
       if (navigator.vibrate) navigator.vibrate(200);
@@ -282,7 +324,7 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
       
       // Resume
       closeValidation();
-      setStatusMsg('✅ ¡Caja registrada! Apunte a la siguiente.');
+      setStatusMsg(' ¡Caja registrada! Apunte a la siguiente.');
     } catch (e) {
       console.error("Error saving box:", e);
       alert("Error al guardar");
@@ -294,7 +336,33 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
     setValidationData(null);
     setIsDuplicateWarning(false);
     setDebugText('');
-    setStatusMsg('📷 Apunte a la etiqueta y presione CAPTURAR');
+    setStatusMsg(' Apunte a la etiqueta y presione CAPTURAR');
+  };
+
+  // Registra todas las cajas confirmadas en el modal de revision multiple
+  // (foto con varias etiquetas), respetando el mismo chequeo de
+  // duplicados que usa el flujo de una sola caja.
+  const handleMultiBoxConfirm = async (boxes: { cut: string; weight: number }[]) => {
+    try {
+      for (const box of boxes) {
+        const isDup = await duplicateService.isPossibleDuplicate(box.cut, box.weight);
+        await saveBoxToDb(box.cut, box.weight, isDup ? 'duplicate' : 'valid', false);
+      }
+      duplicateService.blockTemporarily();
+      onScanSuccess();
+      setMultiBoxCandidates(null);
+      setDebugText('');
+      setStatusMsg(`Se registraron ${boxes.length} cajas de la foto. Apunte a la siguiente.`);
+    } catch (e) {
+      console.error('Error saving multi-box scan:', e);
+      alert('Error al guardar una o mas cajas');
+    }
+  };
+
+  const handleMultiBoxCancel = () => {
+    setMultiBoxCandidates(null);
+    setDebugText('');
+    setStatusMsg(' Apunte a la etiqueta y presione CAPTURAR');
   };
 
   const handleConfirm = () => {
@@ -355,7 +423,7 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
       />
 
       {/* Capture buttons */}
-      {!showValidation && isScanning && (
+      {!showValidation && !multiBoxCandidates && isScanning && (
         <div style={{ display: 'flex', gap: '0.5rem', padding: '0.75rem' }}>
           <button
             className="btn btn-primary"
@@ -388,7 +456,7 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
         </div>
       )}
 
-      {!showValidation && (
+      {!showValidation && !multiBoxCandidates && (
         <div style={{ padding: '0 0.75rem 0.75rem' }}>
           <button
             className='btn btn-secondary'
@@ -464,6 +532,14 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
             </div>
           </div>
         </div>
+      )}
+
+      {multiBoxCandidates && (
+        <MultiBoxReview
+          candidates={multiBoxCandidates}
+          onConfirm={handleMultiBoxConfirm}
+          onCancel={handleMultiBoxCancel}
+        />
       )}
     </div>
   );

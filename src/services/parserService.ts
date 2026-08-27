@@ -286,6 +286,23 @@ export class ParserService {
    * 2. Validación matemática: Tara + Neto = Bruto
    * 3. Búsqueda heurística con todos los números
    */
+  private findMathNeto(uniqueAll: number[]): number | null {
+    if (uniqueAll.length < 3) return null;
+    for (let i = uniqueAll.length - 1; i >= 2; i--) {
+      const bruto = uniqueAll[i];
+      for (let j = i - 1; j >= 1; j--) {
+        const neto = uniqueAll[j];
+        for (let k = j - 1; k >= 0; k--) {
+          const tara = uniqueAll[k];
+          if (Math.abs(bruto - neto - tara) < 0.15 && neto >= 3 && neto <= 50 && tara < 5) {
+            return neto;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   private detectNetWeight(text: string): { weight: number | null; needsReview: boolean } {
     const numberRegex = /(\d+)[.,](\d{1,3})/g;
     const rawMatches: { full: string; value: number; index: number }[] = [];
@@ -338,22 +355,30 @@ export class ParserService {
 
       if (!isNetLine && !isGrossLine) continue;
 
-      // Ventana de búsqueda: la línea actual + las 2 siguientes
-      const window = lines.slice(i, i + 3).join(' ');
-      const nums = extractValidNums(window);
-
       if (isNetLine && !isGrossLine && !isTaraLine) {
-        // En una fila con PESO NETO y PESO BRUTO juntos (tabla), tomar el MENOR
-        // (el neto siempre es menor que el bruto)
-        const windowHasBoth = isGrossLine;
-        if (!windowHasBoth && nums.length > 0) {
-          netFromKeyword = Math.min(...nums); // el menor es el neto
-        } else if (nums.length > 0) {
-          netFromKeyword = Math.min(...nums);
+        // Preferir el numero en la MISMA linea que la keyword de Neto: es
+        // el caso mas confiable (ej. "PESO NETO: 16,65").
+        const sameLineNums = extractValidNums(lines[i]);
+        if (sameLineNums.length > 0) {
+          netFromKeyword = Math.min(...sameLineNums);
+        } else {
+          // Formato tabla: el titulo y el valor estan en filas separadas.
+          // Buscamos en las 2 lineas siguientes, pero DESCARTANDO
+          // cualquiera que sea a su vez una fila de Bruto o Tara -
+          // asi evitamos confundir esos valores con el Neto (bug real
+          // que causaba registrar la Tara como si fuera el Neto).
+          const followingLines = lines.slice(i + 1, i + 3).filter(l => {
+            const u = l.toUpperCase();
+            return !grossKeywords.some(kw => u.includes(kw)) && !taraKeywords.some(kw => u.includes(kw));
+          });
+          const nums = extractValidNums(followingLines.join(' '));
+          if (nums.length > 0) netFromKeyword = Math.min(...nums);
         }
       }
 
       if (isGrossLine && !isNetLine) {
+        const window = lines.slice(i, i + 3).join(' ');
+        const nums = extractValidNums(window);
         if (nums.length > 0) grossFromKeyword = Math.max(...nums);
       }
 
@@ -361,7 +386,8 @@ export class ParserService {
       // Ej: "PESO GRUESO (kg) PESO NETO (kg)"
       // → los valores están en la línea siguiente
       if (isNetLine && isGrossLine && !isTaraLine) {
-        const nextNums = extractValidNums(lines.slice(i + 1, i + 3).join(' '));
+        const nextLinesNoTara = lines.slice(i + 1, i + 3).filter(l => !taraKeywords.some(kw => l.toUpperCase().includes(kw)));
+        const nextNums = extractValidNums(nextLinesNoTara.join(' '));
         if (nextNums.length >= 2) {
           // El neto es el último número (más a la derecha en la tabla)
           netFromKeyword = nextNums[nextNums.length - 1];
@@ -372,27 +398,25 @@ export class ParserService {
       }
     }
 
+    const mathNeto = this.findMathNeto(uniqueAll);
+
     if (netFromKeyword !== null) {
+      const conflictsWithMath = mathNeto !== null && Math.abs(mathNeto - netFromKeyword) > 0.2;
+      // Si hay conflicto, el chequeo matematico (Bruto - Tara = Neto) es
+      // una senal mas confiable que el heuristico de lineas/keywords, asi
+      // que preferimos ese valor - pero igual pedimos revision manual por
+      // las dudas, en vez de confiar ciegamente en ninguno de los dos.
+      if (conflictsWithMath) {
+        return { weight: mathNeto, needsReview: true };
+      }
       return { weight: netFromKeyword, needsReview: false };
     }
 
-    // ======= ESTRATEGIA 2: Validación matemática Bruto - Tara = Neto =======
-    // Incluye tara=0 (que el filtro >0 excluía antes)
-    if (uniqueAll.length >= 3) {
-      for (let i = uniqueAll.length - 1; i >= 2; i--) {
-        const bruto = uniqueAll[i];
-        for (let j = i - 1; j >= 1; j--) {
-          const neto = uniqueAll[j];
-          for (let k = j - 1; k >= 0; k--) {
-            const tara = uniqueAll[k];
-            if (Math.abs(bruto - neto - tara) < 0.15 && neto >= 3 && neto <= 50 && tara < 5) {
-              return { weight: neto, needsReview: false };
-            }
-          }
-        }
-      }
+    if (mathNeto !== null) {
+      return { weight: mathNeto, needsReview: false };
     }
-    // Math check con sólo dos números: Bruto - Tara (si tenemos bruto del keyword)
+
+    // Math check con solo dos numeros: Bruto - Tara (si tenemos bruto del keyword)
     if (grossFromKeyword !== null) {
       const possibleNet = uniqueNumbers.filter(n => n < grossFromKeyword && n >= 3 && n <= 50);
       if (possibleNet.length > 0) {
