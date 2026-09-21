@@ -2,11 +2,12 @@ import { useState } from 'react';
 import { Scanner } from './components/Scanner';
 import { BoxList } from './components/BoxList';
 import { Summary } from './components/Summary';
+import { ManualEntry } from './components/ManualEntry';
 import { exportService } from './services/exportService';
-import { Camera, List, BarChart3, Download } from 'lucide-react';
+import { Camera, List, BarChart3, Download, PackagePlus } from 'lucide-react';
 
 function App() {
-  const [activeTab, setActiveTab] = useState<'scanner' | 'list' | 'summary'>('scanner');
+  const [activeTab, setActiveTab] = useState<'scanner' | 'manual' | 'list' | 'summary'>('scanner');
   
   // A simple state to force re-renders on child components when a scan happens
   const [scanKey, setScanKey] = useState(0);
@@ -33,6 +34,7 @@ function App() {
 
       <main className="main-content">
         {activeTab === 'scanner' && <Scanner onScanSuccess={handleScanSuccess} />}
+        {activeTab === 'manual' && <ManualEntry onAdd={handleScanSuccess} />}
         {activeTab === 'list' && <BoxList key={`list-${scanKey}`} />}
         {activeTab === 'summary' && <Summary key={`summary-${scanKey}`} />}
       </main>
@@ -44,6 +46,13 @@ function App() {
         >
           <Camera size={20} style={{ margin: '0 auto', marginBottom: '0.25rem' }} />
           <div>Escáner</div>
+        </button>
+        <button 
+          className={`nav-tab ${activeTab === 'manual' ? 'active' : ''}`}
+          onClick={() => setActiveTab('manual')}
+        >
+          <PackagePlus size={20} style={{ margin: '0 auto', marginBottom: '0.25rem' }} />
+          <div>Manual</div>
         </button>
         <button 
           className={`nav-tab ${activeTab === 'list' ? 'active' : ''}`}

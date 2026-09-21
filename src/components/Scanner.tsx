@@ -350,7 +350,8 @@ export const Scanner: React.FC<ScannerProps> = ({ onScanSuccess }) => {
       netWeight: weight,
       timestamp: Date.now(),
       manualCorrection: isManualCorrection,
-      status
+      status,
+      source: 'ocr'
     });
   };
 

@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Imagen interna de referencia (codigos de balanza) - no se publica
+b20c9148-a721-49c6-a2b3-e23115cd2a94.png
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

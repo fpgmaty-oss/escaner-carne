@@ -12,6 +12,7 @@ export class ExportService {
       'Corte': box.cutName,
       'Peso Neto (kg)': box.netWeight,
       'Fecha y Hora': new Date(box.timestamp).toLocaleString(),
+      'Origen': box.source === 'manual' ? 'Manual' : 'Escaneo',
       'Corrección Manual': box.manualCorrection ? 'Sí' : 'No',
       'Estado': box.status
     }));
