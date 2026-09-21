@@ -220,14 +220,13 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
                   <input
                     ref={weightInputRef}
                     id="manual-weight-input"
-                    type="number"
+                    type="text"
                     inputMode="decimal"
-                    step="0.001"
-                    min="0"
+                    pattern="[0-9]*[.,]?[0-9]*"
                     className="form-control"
                     value={weightInput}
                     onChange={e => setWeightInput(e.target.value)}
-                    placeholder={weightUnit === 'kg' ? 'Ej: 12,450' : 'Ej: 450'}
+                    placeholder={weightUnit === 'kg' ? 'Ej: 25.5 o 25,5' : 'Ej: 450'}
                     style={{ flex: 1 }}
                   />
                   <div style={{ display: 'flex', borderRadius: 'var(--radius-md)', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }}>
