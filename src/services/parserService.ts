@@ -1,3 +1,5 @@
+import { MEAT_CUTS } from '../data/meatCuts';
+
 export interface ParseResult {
   cutCandidate: string | null;
   weightCandidate: number | null;
@@ -23,37 +25,26 @@ const STOPWORDS = new Set(['DE', 'DEL', 'LA', 'LAS', 'EL', 'LOS', 'Y']);
  * El sistema compara estos nombres contra el texto leído por el OCR
  * usando coincidencia difusa (fuzzy matching) para tolerar errores de lectura.
  */
-const DEFAULT_CUTS = [
+// Sinonimos/variantes que el OCR suele leer en las etiquetas y que no
+// coinciden textualmente con el nombre "oficial" del catalogo (ej. la
+// etiqueta dice "PUNTA DE GANSO" pero el catalogo oficial le dice
+// "PUNTA GANSO"). Se suman al catalogo oficial para no perder ningun
+// match que ya andaba funcionando antes de unificar las fuentes.
+const OCR_SYNONYMS = [
   'ASADO DEL CARNICERO',
   'ASADO DE TIRA',
-  'SOBRECOSTILLA',
-  'LOMO VETADO',
-  'LOMO LISO',
-  'ASIENTO',
-  'POSTA ROSADA',
-  'POSTA NEGRA',
-  'POSTA PALETA',
   'PUNTA DE GANSO',
-  'PUNTA PICANA',
-  'FILETE',
-  'HUACHALOMO',
-  'ABASTERO',
-  'PALANCA',
-  'ENTRAÑA',
-  'GANSO',
-  'TAPAPECHO',
-  'CHOCLO',
-  'COGOTE',
-  'TAPABARRIGA',
-  'PLATEADA',
   'PUNTA DE PALETA',
+  'COGOTE',
   'COLUDA',
   'OSSOBUCO',
   'OSOBUCO',
   'PALETA',
   'CARNE MOLIDA',
-  'CHOCLILLO'
+  'CHOCLO',
 ];
+
+const DEFAULT_CUTS = Array.from(new Set([...MEAT_CUTS, ...OCR_SYNONYMS]));
 
 export class ParserService {
   private cuts: string[] = DEFAULT_CUTS;

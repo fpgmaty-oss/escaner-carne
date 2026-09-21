@@ -9,6 +9,12 @@ export interface ScannedBox {
   labelId?: string; // Optional identifier from the label if any
   manualCorrection: boolean;
   status: 'valid' | 'duplicate' | 'pending_review';
+  /**
+   * Origen del registro. 'ocr' = detectado por camara/foto (default
+   * implicito para registros viejos, que no tienen este campo).
+   * 'manual' = cargado a mano desde la ventana de carga manual.
+   */
+  source?: 'ocr' | 'manual';
 }
 
 export class AppDatabase extends Dexie {

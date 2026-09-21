@@ -42,6 +42,7 @@ export const BoxList: React.FC = () => {
                 <div className="list-item-subtitle">
                   {box.netWeight.toFixed(3)} kg • {new Date(box.timestamp).toLocaleTimeString()}
                   {box.manualCorrection && ' • (Editado)'}
+                  {box.source === 'manual' && ' • (Manual)'}
                 </div>
               </div>
               <div className="list-item-actions">

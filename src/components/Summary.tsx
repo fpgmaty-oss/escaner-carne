@@ -1,43 +1,21 @@
 import React, { useEffect, useState } from 'react';
 import { db } from '../services/db';
-
-interface SummaryData {
-  cut: string;
-  count: number;
-  totalWeight: number;
-}
+import { groupBoxesByCut } from '../services/summaryService';
+import type { CutSummary } from '../services/summaryService';
 
 export const Summary: React.FC = () => {
-  const [summary, setSummary] = useState<SummaryData[]>([]);
+  const [summary, setSummary] = useState<CutSummary[]>([]);
   const [totalBoxes, setTotalBoxes] = useState(0);
   const [totalWeight, setTotalWeight] = useState(0);
 
   useEffect(() => {
     const loadSummary = async () => {
       const boxes = await db.boxes.toArray();
-      
-      const summaryMap = new Map<string, SummaryData>();
-      let tBoxes = 0;
-      let tWeight = 0;
+      const grouped = groupBoxesByCut(boxes);
 
-      boxes.forEach(box => {
-        tBoxes++;
-        tWeight += box.netWeight;
-
-        const current = summaryMap.get(box.cutName) || { cut: box.cutName, count: 0, totalWeight: 0 };
-        summaryMap.set(box.cutName, {
-          cut: box.cutName,
-          count: current.count + 1,
-          totalWeight: current.totalWeight + box.netWeight
-        });
-      });
-
-      // Sort alphabetically
-      const sortedSummary = Array.from(summaryMap.values()).sort((a, b) => a.cut.localeCompare(b.cut));
-      
-      setSummary(sortedSummary);
-      setTotalBoxes(tBoxes);
-      setTotalWeight(tWeight);
+      setSummary(grouped);
+      setTotalBoxes(boxes.length);
+      setTotalWeight(boxes.reduce((sum, b) => sum + b.netWeight, 0));
     };
 
     loadSummary();
