@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ListChecks, X } from 'lucide-react';
 import { db } from '../services/db';
 import type { ScannedBox } from '../services/db';
@@ -13,17 +13,21 @@ interface ManualEntryProps {
 
 /**
  * Ventana separada para cargar cortes a mano (sin camara/OCR), pensada para
- * conteo rapido durante la recepcion/despacho: los 22 cortes del catalogo
- * quedan siempre visibles en una lista vertical. Un toque en el nombre del
- * corte = +1 caja para ese corte, sin pasos intermedios (nada de abrir un
- * desplegable ni tipear cantidades). Cada caja se guarda en la misma tabla
- * `boxes` que usa el escaner, asi que termina apareciendo en "Cajas" y en
- * el "Resumen" general junto con lo escaneado.
+ * conteo rapido de CAJAS y KILOS durante la recepcion/despacho: los 22
+ * cortes del catalogo quedan siempre visibles en una lista vertical. Un
+ * toque en el nombre del corte abre un mini formulario para ingresar el
+ * peso neto de esa caja; al confirmar, se suma 1 caja y los kg quedan
+ * acumulados para ese corte. Cada caja se guarda en la misma tabla `boxes`
+ * que usa el escaner, asi que termina apareciendo en "Cajas" y en el
+ * "Resumen" general junto con lo escaneado.
  */
 export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
   const [manualBoxes, setManualBoxes] = useState<ScannedBox[]>([]);
   const [showRecent, setShowRecent] = useState(false);
   const [justAdded, setJustAdded] = useState<string | null>(null);
+  const [pendingCut, setPendingCut] = useState<string | null>(null);
+  const [weightInput, setWeightInput] = useState('');
+  const weightInputRef = useRef<HTMLInputElement>(null);
 
   const loadManualBoxes = async () => {
     const boxes = await db.boxes.toArray();
@@ -41,16 +45,41 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
     return () => clearTimeout(t);
   }, [justAdded]);
 
-  const handleTapCut = async (cut: string) => {
+  // Foco automatico en el input de peso al abrir el mini formulario, para
+  // que en el celular salga el teclado numerico de una sola vez.
+  useEffect(() => {
+    if (pendingCut) weightInputRef.current?.focus();
+  }, [pendingCut]);
+
+  const openWeightPrompt = (cut: string) => {
+    setWeightInput('');
+    setPendingCut(cut);
+  };
+
+  const closeWeightPrompt = () => {
+    setPendingCut(null);
+    setWeightInput('');
+  };
+
+  const confirmAdd = async () => {
+    if (!pendingCut) return;
+    const weight = parseFloat(weightInput.replace(',', '.'));
+    if (isNaN(weight) || weight < 0) {
+      alert('Ingresá un peso válido en kg (ej: 12,450).');
+      return;
+    }
+
     await db.boxes.add({
-      cutName: cut,
-      netWeight: 0,
+      cutName: pendingCut,
+      netWeight: weight,
       timestamp: Date.now(),
       manualCorrection: false,
       status: 'valid',
       source: 'manual',
     });
-    setJustAdded(cut);
+
+    setJustAdded(pendingCut);
+    closeWeightPrompt();
     await loadManualBoxes();
     onAdd();
   };
@@ -62,14 +91,14 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
     onAdd();
   };
 
-  const countFor = (cut: string) => manualBoxes.filter(b => b.cutName === cut).length;
+  const boxesFor = (cut: string) => manualBoxes.filter(b => b.cutName === cut);
 
   const lastTen = [...manualBoxes].sort((a, b) => b.timestamp - a.timestamp).slice(0, 10);
 
   return (
     <div className="card" style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.5rem' }}>
-        <h2 className="card-title" style={{ marginBottom: 0 }}>Tocá un corte para sumar 1 caja</h2>
+        <h2 className="card-title" style={{ marginBottom: 0 }}>Tocá un corte para cargar una caja</h2>
         <button
           type="button"
           className="btn btn-secondary"
@@ -91,12 +120,14 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
         {SORTED_CUTS.map(cut => {
-          const count = countFor(cut);
+          const boxes = boxesFor(cut);
+          const count = boxes.length;
+          const totalKg = boxes.reduce((sum, b) => sum + b.netWeight, 0);
           return (
             <button
               key={cut}
               type="button"
-              onClick={() => handleTapCut(cut)}
+              onClick={() => openWeightPrompt(cut)}
               style={{
                 display: 'flex',
                 justifyContent: 'space-between',
@@ -115,7 +146,14 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
                 transition: 'all 0.15s ease'
               }}
             >
-              <span>{cut}</span>
+              <span>
+                {cut}
+                {count > 0 && (
+                  <span style={{ display: 'block', fontWeight: 400, fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                    {totalKg.toFixed(3)} kg
+                  </span>
+                )}
+              </span>
               {count > 0 && (
                 <span
                   style={{
@@ -134,6 +172,44 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
           );
         })}
       </div>
+
+      {pendingCut && (
+        <div className="modal-overlay" onClick={closeWeightPrompt}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <h2 className="modal-title">{pendingCut}</h2>
+            <form
+              onSubmit={e => {
+                e.preventDefault();
+                confirmAdd();
+              }}
+            >
+              <div className="form-group">
+                <label htmlFor="manual-weight-input">Peso neto (kg)</label>
+                <input
+                  ref={weightInputRef}
+                  id="manual-weight-input"
+                  type="number"
+                  inputMode="decimal"
+                  step="0.001"
+                  min="0"
+                  className="form-control"
+                  value={weightInput}
+                  onChange={e => setWeightInput(e.target.value)}
+                  placeholder="Ej: 12,450"
+                />
+              </div>
+              <div className="modal-actions">
+                <button type="button" className="btn btn-secondary" onClick={closeWeightPrompt}>
+                  Cancelar
+                </button>
+                <button type="submit" className="btn btn-primary">
+                  Agregar caja
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {showRecent && (
         <div className="modal-overlay" onClick={() => setShowRecent(false)}>
@@ -154,7 +230,9 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
                   <div key={box.id} className="list-item">
                     <div className="list-item-content">
                       <div className="list-item-title">{i + 1}. {box.cutName}</div>
-                      <div className="list-item-subtitle">{new Date(box.timestamp).toLocaleTimeString()}</div>
+                      <div className="list-item-subtitle">
+                        {box.netWeight.toFixed(3)} kg • {new Date(box.timestamp).toLocaleTimeString()}
+                      </div>
                     </div>
                     <div className="list-item-actions">
                       <button
