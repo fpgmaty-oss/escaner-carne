@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { db } from '../services/db';
 import type { ScannedBox } from '../services/db';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Pencil } from 'lucide-react';
+import { EditBoxModal } from './EditBoxModal';
 
 export const BoxList: React.FC = () => {
   const [boxes, setBoxes] = useState<ScannedBox[]>([]);
+  const [editingBox, setEditingBox] = useState<ScannedBox | null>(null);
 
   const loadBoxes = async () => {
     const data = await db.boxes.orderBy('timestamp').reverse().toArray();
@@ -46,10 +48,19 @@ export const BoxList: React.FC = () => {
                 </div>
               </div>
               <div className="list-item-actions">
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '0.5rem' }}
+                  onClick={() => setEditingBox(box)}
+                  title="Editar corte o peso"
+                >
+                  <Pencil size={16} />
+                </button>
                 <button 
                   className="btn btn-secondary" 
                   style={{ padding: '0.5rem' }}
                   onClick={() => handleDelete(box.id)}
+                  title="Eliminar"
                 >
                   <Trash2 size={16} />
                 </button>
@@ -57,6 +68,14 @@ export const BoxList: React.FC = () => {
             </div>
           ))}
         </div>
+      )}
+
+      {editingBox && (
+        <EditBoxModal
+          box={editingBox}
+          onClose={() => setEditingBox(null)}
+          onSaved={loadBoxes}
+        />
       )}
     </div>
   );

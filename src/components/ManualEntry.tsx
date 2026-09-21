@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { ListChecks, X, Pencil } from 'lucide-react';
+import { ListChecks, X, Pencil, Search } from 'lucide-react';
 import { db } from '../services/db';
 import type { ScannedBox } from '../services/db';
 import { MEAT_CUTS } from '../data/meatCuts';
+import { EditBoxModal } from './EditBoxModal';
 
 const SORTED_CUTS = [...MEAT_CUTS].sort((a, b) => a.localeCompare(b));
 
@@ -13,28 +14,32 @@ interface ManualEntryProps {
   onAdd: () => void;
 }
 
+/** Normaliza para buscar sin acentos y sin importar mayus/minus. */
+const normalize = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+
 /**
  * Ventana separada para cargar cortes a mano (sin camara/OCR), pensada para
  * conteo de CAJAS y KILOS durante la recepcion/despacho: los 22 cortes del
- * catalogo quedan siempre visibles en una lista vertical. Tocar un corte
- * SIEMPRE abre el mini formulario de peso (no hay atajo para sumar una caja
- * sin peso): como cada caja pesa distinto, agregar "a ciegas" le haria
- * perder el sentido al conteo de kilos.
+ * catalogo quedan siempre visibles en una lista vertical (filtrable con el
+ * buscador). Tocar un corte SIEMPRE abre el mini formulario de peso (no hay
+ * atajo para sumar una caja sin peso): como cada caja pesa distinto,
+ * agregar "a ciegas" le haria perder el sentido al conteo de kilos.
  */
 export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
   const [manualBoxes, setManualBoxes] = useState<ScannedBox[]>([]);
   const [showRecent, setShowRecent] = useState(false);
   const [justAdded, setJustAdded] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
 
-  // Estado del mini formulario de peso. Sirve tanto para agregar una caja
-  // nueva (editingBoxId === null) como para corregir el peso de una caja
-  // ya cargada (editingBoxId === id de esa caja), asi no hace falta
-  // borrar y volver a cargar solo porque se tipeo mal un numero.
-  const [pendingCut, setPendingCut] = useState<string | null>(null);
-  const [editingBoxId, setEditingBoxId] = useState<number | null>(null);
+  // Mini formulario para AGREGAR una caja nueva (el corte ya viene fijo,
+  // porque se elige tocando el boton correspondiente de la lista).
+  const [addingCut, setAddingCut] = useState<string | null>(null);
   const [weightInput, setWeightInput] = useState('');
   const [weightUnit, setWeightUnit] = useState<WeightUnit>('kg');
   const weightInputRef = useRef<HTMLInputElement>(null);
+
+  // Caja que se esta corrigiendo (corte y/o peso) desde "Ultimas 10".
+  const [editingBox, setEditingBox] = useState<ScannedBox | null>(null);
 
   const loadManualBoxes = async () => {
     const boxes = await db.boxes.toArray();
@@ -55,61 +60,47 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
   // Foco automatico en el input de peso al abrir el mini formulario, para
   // que en el celular salga el teclado numerico de una sola vez.
   useEffect(() => {
-    if (pendingCut) weightInputRef.current?.focus();
-  }, [pendingCut]);
+    if (addingCut) weightInputRef.current?.focus();
+  }, [addingCut]);
 
   const openWeightPrompt = (cut: string) => {
-    setPendingCut(cut);
-    setEditingBoxId(null);
+    setAddingCut(cut);
     setWeightInput('');
-    setWeightUnit('kg');
-  };
-
-  const openEditPrompt = (box: ScannedBox) => {
-    if (!box.id) return;
-    setPendingCut(box.cutName);
-    setEditingBoxId(box.id);
-    setWeightInput(String(box.netWeight));
     setWeightUnit('kg');
   };
 
   const closeWeightPrompt = () => {
-    setPendingCut(null);
-    setEditingBoxId(null);
+    setAddingCut(null);
     setWeightInput('');
   };
 
-  const confirmWeight = async () => {
-    if (!pendingCut) return;
+  const confirmAdd = async () => {
+    if (!addingCut) return;
     const rawValue = parseFloat(weightInput.replace(',', '.'));
     if (isNaN(rawValue) || rawValue < 0) {
-      alert('Ingresá un peso válido (ej: 12,450).');
+      alert('Ingresá un peso válido (ej: 25.5 o 25,5).');
       return;
     }
     // Adentro de la app todo se guarda en KG (asi combina con lo que ya
     // registra el escaner OCR); si el usuario tipeo en gramos, se convierte.
-    const weightKg = weightUnit === 'g' ? rawValue / 1000 : rawValue;
+    const netWeight = weightUnit === 'g' ? rawValue / 1000 : rawValue;
 
-    if (editingBoxId !== null) {
-      await db.boxes.update(editingBoxId, { netWeight: weightKg, manualCorrection: true });
-    } else {
-      await db.boxes.add({
-        cutName: pendingCut,
-        netWeight: weightKg,
-        timestamp: Date.now(),
-        manualCorrection: false,
-        status: 'valid',
-        source: 'manual',
-      });
-      setJustAdded(pendingCut);
-    }
+    await db.boxes.add({
+      cutName: addingCut,
+      netWeight,
+      timestamp: Date.now(),
+      manualCorrection: false,
+      status: 'valid',
+      source: 'manual',
+    });
+    setJustAdded(addingCut);
 
     closeWeightPrompt();
     await loadManualBoxes();
     onAdd();
   };
 
-  const handleUndo = async (id?: number) => {
+  const handleDelete = async (id?: number) => {
     if (!id) return;
     await db.boxes.delete(id);
     await loadManualBoxes();
@@ -117,6 +108,10 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
   };
 
   const boxesFor = (cut: string) => manualBoxes.filter(b => b.cutName === cut);
+
+  const visibleCuts = search.trim()
+    ? SORTED_CUTS.filter(cut => normalize(cut).includes(normalize(search)))
+    : SORTED_CUTS;
 
   const lastTen = [...manualBoxes].sort((a, b) => b.timestamp - a.timestamp).slice(0, 10);
 
@@ -135,6 +130,18 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
         </button>
       </div>
 
+      <div style={{ position: 'relative' }}>
+        <Search size={16} style={{ position: 'absolute', left: '0.85rem', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)' }} />
+        <input
+          type="text"
+          className="form-control"
+          style={{ paddingLeft: '2.25rem' }}
+          placeholder="Buscar corte..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+      </div>
+
       <div style={{ minHeight: '1.25rem', textAlign: 'center' }}>
         {justAdded && (
           <span style={{ color: 'var(--success-color)', fontSize: '0.875rem', fontWeight: 600 }}>
@@ -144,7 +151,10 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-        {SORTED_CUTS.map(cut => {
+        {visibleCuts.length === 0 && (
+          <p style={{ color: 'var(--text-secondary)', textAlign: 'center' }}>Ningún corte coincide con "{search}".</p>
+        )}
+        {visibleCuts.map(cut => {
           const boxes = boxesFor(cut);
           const count = boxes.length;
           const totalKg = boxes.reduce((sum, b) => sum + b.netWeight, 0);
@@ -202,16 +212,14 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
         Los datos quedan guardados solo en este navegador — exportá a Excel seguido para no perderlos.
       </p>
 
-      {pendingCut && (
+      {addingCut && (
         <div className="modal-overlay" onClick={closeWeightPrompt}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <h2 className="modal-title">
-              {editingBoxId !== null ? `Editar peso · ${pendingCut}` : pendingCut}
-            </h2>
+            <h2 className="modal-title">{addingCut}</h2>
             <form
               onSubmit={e => {
                 e.preventDefault();
-                confirmWeight();
+                confirmAdd();
               }}
             >
               <div className="form-group">
@@ -256,7 +264,7 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
                   Cancelar
                 </button>
                 <button type="submit" className="btn btn-primary">
-                  {editingBoxId !== null ? 'Guardar cambio' : 'Agregar caja'}
+                  Agregar caja
                 </button>
               </div>
             </form>
@@ -293,8 +301,8 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
                         type="button"
                         className="btn btn-secondary"
                         style={{ padding: '0.5rem' }}
-                        onClick={() => openEditPrompt(box)}
-                        title="Editar peso"
+                        onClick={() => setEditingBox(box)}
+                        title="Editar corte o peso"
                       >
                         <Pencil size={16} />
                       </button>
@@ -302,7 +310,7 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
                         type="button"
                         className="btn btn-secondary"
                         style={{ padding: '0.5rem' }}
-                        onClick={() => handleUndo(box.id)}
+                        onClick={() => handleDelete(box.id)}
                         title="Eliminar esta caja"
                       >
                         <X size={16} />
@@ -320,6 +328,17 @@ export const ManualEntry: React.FC<ManualEntryProps> = ({ onAdd }) => {
             </div>
           </div>
         </div>
+      )}
+
+      {editingBox && (
+        <EditBoxModal
+          box={editingBox}
+          onClose={() => setEditingBox(null)}
+          onSaved={() => {
+            loadManualBoxes();
+            onAdd();
+          }}
+        />
       )}
     </div>
   );
